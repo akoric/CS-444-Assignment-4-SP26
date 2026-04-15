@@ -1,0 +1,7 @@
+VOC_DATA/
+__pycache__/
+*.pyc
+*.pyo
+*.pth
+*.egg-info/
+.ipynb_checkpoints/
