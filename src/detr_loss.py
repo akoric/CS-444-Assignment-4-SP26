@@ -213,15 +213,25 @@ class DETRSetCriterion(nn.Module):
         all matched predictions across the whole batch.
 
         For example, if we have a batch of 2 images and the matcher returns:
+        # (src_idx, tgt_idx)
+        # the src side tells which query indices were matched, 
+        # the tgt side tells which GT object they were matched to.
         indices = [
-            (tensor([0, 2]), tensor([1, 0])),  # For image 0, query 0 is matched
-                                               # to target 1, and query 2 is matched to target 0
-            (tensor([1]), tensor([0])),        # For image 1, query 1 is matched to target 0
+            (tensor([0, 2]), tensor([1, 0])), # image 0 
+                                               
+            (tensor([1]), tensor([0])),       # image 1    
         ]
+        # For image 0, query 0 is matched
+        # to target 1, and query 2 is matched to target 0
+        # For image 1, query 1 is matched to target 0
+
         Then the output of _get_src_permutation_idx would be:
 
-        batch_idx = tensor([0, 0, 1])  # Indicates the batch index for each matched query
-        src_idx = tensor([0, 2, 1])  # Indicates the query index for each matched query
+        # batch_idx — for each matched query, which image does it belong to
+        batch_idx = tensor([0, 0, 1])
+
+        # src_idx — for each matched query, what is its query index
+        src_idx = tensor([0, 2, 1])
 
         This means that for the first image (batch index 0), query indices 0 and 2
         are matched, and for the second image (batch index 1), query index 1 is matched.
@@ -248,17 +258,43 @@ class DETRSetCriterion(nn.Module):
         """
         # TODO: Use _get_src_permutation_idx to get the batch and query indices of
         # the matched predictions.
+        batch_idx, src_idx = self._get_src_permutation_idx(indices)
 
-        # TODO: Construct a tensor containing the GT class label for every matched query.
+        # TODO: Construct a tensor containing the GT class label for every matched query
+        # shape: [num_matched] — GT class for each matched query, in the same order as batch_idx/src_idx
+        target_classes_matched = torch.cat([
+            t["labels"][tgt_idx] for t, (_, tgt_idx) in zip(targets, indices)
+        ])
+        # Example:
+        # t["labels"] = tensor([7, 12, 14])   # all GT labels for this image
+        # tgt_idx     = tensor([1, 0])        # matched GT indices
+        # t["labels"][tgt_idx] = tensor([12, 7])  # labels in match order
 
-        # TODO: Fill every query with the no-object label (num_classes) to start, then
+
+        # TODO: Fill every query with the no-object label (num_classes) to start
+        pred_logits = outputs["pred_logits"]  # [B, Q, C+1]
+        B, num_queries = pred_logits.shape[:2]
+        target_labels = torch.full(
+            (B, num_queries),   # shape [B, 25]
+            fill_value=self.num_classes, # 20 = "no object" class
+            dtype=torch.long,
+            device=pred_logits.device
+        )
         # overwrite just the matched positions with their actual GT class.
+        
+        target_labels[batch_idx, src_idx] = target_classes_matched # [B, 25]
 
         # TODO: Compute CE loss, weighting the no-object class with self.empty_weight.
         # Sum the log probs over the queries and take the mean over the batch.
         # Using F.cross_entropy with default arguments may not give the correct implementation.
+        loss_ce = F.cross_entropy(
+            pred_logits.flatten(0, 1),  # [B*Q, C+1]
+            target_labels.flatten(),    # [B*Q] ie [B * 25]
+            weight=self.empty_weight,   # down weights the "no object = 20" class
+            reduction='sum'
+        ) / B
 
-        return {"loss_ce": ...}
+        return {"loss_ce": loss_ce}
 
     def loss_boxes(self, outputs, targets, indices, num_boxes):
         """L1 and GIoU losses on matched query/target pairs only.
@@ -281,18 +317,37 @@ class DETRSetCriterion(nn.Module):
         """
         # TODO: Use _get_src_permutation_idx to get the batch and query indices of
         # the matched predictions.
+        batch_idx, src_idx = self._get_src_permutation_idx(indices)
 
         # TODO: Construct a tensor containing the GT class label for every matched query.
+        src_boxes = outputs["pred_boxes"][batch_idx, src_idx] # [num_matched, 4]
+        target_boxes = torch.cat([
+            t["boxes"][tgt_idx] for t, (_, tgt_idx) in zip(targets, indices) 
+        ]) # [num_matched, 4]
 
         # TODO: Compute the L1 box loss.
+        loss_bbox = F.l1_loss(
+            src_boxes,
+            target_boxes,
+            reduction='sum'
+        )
+        loss_bbox = loss_bbox / num_boxes
+        
 
         # TODO: Compute the GIoU box loss. You can use the provided generalized_box_iou
         # function, but remember to convert boxes from cxcywh to xyxy format first. Note:
         # The (i, j) entry of the giou matrix contains the GIoU value between src_boxes[i]
         # and target_boxes[j]. We want to sum over the matched pairs, already aligned
         # by Hungarian matching.
+        src_boxes_xyxy = box_cxcywh_to_xyxy(src_boxes)
+        target_boxes_xyxy = box_cxcywh_to_xyxy(target_boxes)
+        giou = generalized_box_iou(src_boxes_xyxy, target_boxes_xyxy)
 
-        return {"loss_bbox": ..., "loss_giou": ...}
+        loss_giou = (1 - giou.diagonal()).sum() / num_boxes # take matched pairs only
+
+
+
+        return {"loss_bbox": loss_bbox, "loss_giou": loss_giou}
 
     def forward(self, outputs, targets):
         """Match predictions to targets and compute all DETR loss terms.

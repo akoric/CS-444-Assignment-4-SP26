@@ -397,25 +397,44 @@ class YOLOLoss(nn.Module):
             reg_xy_loss, reg_wh_loss, obj_loss, no_obj_loss, cls_loss.
         """
         # TODO: Step 1: Split pred_tensor into predicted_boxes and predicted_class_scores.
+        
+        predicted_boxes, predicted_class_scores = self.split_prediction_tensor(pred_tensor)
 
         # TODO: Step 2: Find the responsible predictor for each object cell and
         # build the responsible mask (1_ij^obj).
 
+        responsible_box_predictions, responsible_box_ious, best_indices = self.choose_responsible_box(predicted_boxes, target_boxes, has_object_map)
+        responsible_mask = self.build_responsible_mask(predicted_boxes, has_object_map, best_indices)
+
         # TODO: Step 3: Compute regression loss terms.
+        target_boxes_for_object_cells = target_boxes[has_object_map]
+        xy_loss = self.regression_xy_loss(responsible_box_predictions, target_boxes_for_object_cells)
+        wh_loss = self.regression_wh_loss(responsible_box_predictions, target_boxes_for_object_cells)
 
         # TODO: Step 4: Compute confidence loss terms for object and no-object predictors.
+        obj_loss = self.object_confidence_loss(responsible_box_predictions, responsible_box_ious)
+        no_obj_loss = self.no_object_confidence_loss(predicted_boxes, responsible_mask)
 
         # TODO: Step 5: Compute class probability.
+        class_loss = self.class_probability_loss(predicted_class_scores, target_cls, has_object_map)
 
         # TODO: Step 6: Scale the terms by the appropriate weights, and divide
         # every term by batch_size to normalize.
+        N = pred_tensor.shape[0]
+        reg_xy_loss = self.lambda_coord * xy_loss / N
+        reg_wh_loss = self.lambda_coord * wh_loss / N
+        reg_loss = reg_xy_loss + reg_wh_loss
+        obj_loss = obj_loss / N
+        no_obj_loss = self.lambda_noobj * no_obj_loss / N
+        cls_loss = class_loss / N
+        total_loss = reg_loss + obj_loss + no_obj_loss + cls_loss
 
         return {
-            "total_loss": ...,
-            "reg_loss": ...,
-            "reg_xy_loss": ...,
-            "reg_wh_loss": ...,
-            "obj_loss": ...,
-            "no_obj_loss": ...,
-            "cls_loss": ...,
+            "total_loss": total_loss,
+            "reg_loss": reg_loss,
+            "reg_xy_loss": reg_xy_loss,
+            "reg_wh_loss": reg_wh_loss,
+            "obj_loss": obj_loss,
+            "no_obj_loss": no_obj_loss,
+            "cls_loss": cls_loss,
         }
