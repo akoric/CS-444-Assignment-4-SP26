@@ -67,19 +67,23 @@ class YOLOLoss(nn.Module):
     with the ground-truth box.
     """
 
-    def __init__(self, grid_size, boxes_per_cell, lambda_coord, lambda_noobj):
+    def __init__(self, grid_size, boxes_per_cell, lambda_coord, lambda_noobj, use_smooth_l1=False):
         """
         Args:
             grid_size: Number of cells per spatial dimension (S in the slide).
             boxes_per_cell: Number of box predictors per cell (B in the slide).
             lambda_coord: Weight on the box regression terms.
             lambda_noobj: Weight on the no-object confidence term.
+            use_smooth_l1: If True, use Smooth L1 (Huber) loss for the box
+                regression terms (xy and wh) instead of MSE. Smooth L1 is
+                less sensitive to outliers during early training.
         """
         super().__init__()
         self.grid_size = grid_size
         self.boxes_per_cell = boxes_per_cell
         self.lambda_coord = lambda_coord
         self.lambda_noobj = lambda_noobj
+        self.use_smooth_l1 = use_smooth_l1
 
     def split_prediction_tensor(self, prediction_tensor):
         """Split the raw model output into box predictions and class scores.
@@ -279,7 +283,10 @@ class YOLOLoss(nn.Module):
         x_hat = target_boxes_for_object_cells[:, 0]
         y_hat = target_boxes_for_object_cells[:, 1]
 
-        xy_loss = ((x - x_hat)**2 + (y - y_hat)**2).sum()
+        if self.use_smooth_l1:
+            xy_loss = F.smooth_l1_loss(x, x_hat, reduction="sum") + F.smooth_l1_loss(y, y_hat, reduction="sum")
+        else:
+            xy_loss = ((x - x_hat)**2 + (y - y_hat)**2).sum()
 
         return xy_loss
  
@@ -318,7 +325,10 @@ class YOLOLoss(nn.Module):
         h_hat_clamped = torch.clamp(h_hat, min=1e-6)
         sqrt_h_hat = torch.sqrt(h_hat_clamped)
 
-        wh_loss = ((sqrt_w  - sqrt_w_hat)**2 + (sqrt_h - sqrt_h_hat)**2).sum()
+        if self.use_smooth_l1:
+            wh_loss = F.smooth_l1_loss(sqrt_w, sqrt_w_hat, reduction="sum") + F.smooth_l1_loss(sqrt_h, sqrt_h_hat, reduction="sum")
+        else:
+            wh_loss = ((sqrt_w  - sqrt_w_hat)**2 + (sqrt_h - sqrt_h_hat)**2).sum()
 
         return wh_loss
         

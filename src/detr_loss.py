@@ -188,6 +188,7 @@ class DETRSetCriterion(nn.Module):
         matcher,
         weight_dict,
         eos_coef=0.1,
+        use_smooth_l1=False,
     ):
         """
         Args:
@@ -195,11 +196,15 @@ class DETRSetCriterion(nn.Module):
             matcher: HungarianMatcher used to align queries with targets.
             weight_dict: Dictionary of scalar weights for each named loss.
             eos_coef: Relative weight for the "no object" class in CE loss.
+            use_smooth_l1: If True, use Smooth L1 (Huber) loss for the L1
+                bounding-box regression term instead of plain L1. Smooth L1
+                clips large gradients and can stabilise early training.
         """
         super().__init__()
         self.num_classes = num_classes
         self.matcher = matcher
         self.weight_dict = weight_dict
+        self.use_smooth_l1 = use_smooth_l1
 
         # class-weight vector for cross-entropy; last entry is the no-object class
         empty_weight = torch.ones(self.num_classes + 1)
@@ -320,19 +325,31 @@ class DETRSetCriterion(nn.Module):
         batch_idx, src_idx = self._get_src_permutation_idx(indices)
 
         # TODO: Construct a tensor containing the GT class label for every matched query.
-        src_boxes = outputs["pred_boxes"][batch_idx, src_idx] # [num_matched, 4]
+        src_boxes = outputs["pred_boxes"][batch_idx, src_idx]   # [num_matched, 4]
+        # Each t["boxes"][tgt_idx] is [0, 4] when an image has no GT boxes, so
+        # torch.cat always receives a non-empty list and handles the empty case fine.
         target_boxes = torch.cat([
-            t["boxes"][tgt_idx] for t, (_, tgt_idx) in zip(targets, indices) 
-        ]) # [num_matched, 4]
+            t["boxes"][tgt_idx] for t, (_, tgt_idx) in zip(targets, indices)
+        ])  # [num_matched, 4]
 
         # TODO: Compute the L1 box loss.
-        loss_bbox = F.l1_loss(
-            src_boxes,
-            target_boxes,
-            reduction='sum'
-        )
+        if self.use_smooth_l1:
+            loss_bbox = F.smooth_l1_loss(src_boxes, target_boxes, reduction="sum")
+        else:
+            loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction="sum")
         loss_bbox = loss_bbox / num_boxes
-        
+        """
+        if any(len(tgt) > 0 for _, tgt in indices) else src_boxes.new_zeros((0, 4)) # [num_matched, 4]
+
+        # If there are no matched pairs (all-empty batch), return zero losses that
+        # still have a gradient path through pred_boxes so backprop doesn't break.
+        if len(src_boxes) == 0:
+            return {
+                "loss_bbox": outputs["pred_boxes"].sum() * 0.0,
+                "loss_giou": outputs["pred_boxes"].sum() * 0.0,
+            }
+
+        """
 
         # TODO: Compute the GIoU box loss. You can use the provided generalized_box_iou
         # function, but remember to convert boxes from cxcywh to xyxy format first. Note:
@@ -361,8 +378,17 @@ class DETRSetCriterion(nn.Module):
         """
         # TODO: Use the Hungarian matcher (self.matcher) to find the best matching
         # between predicted queries and GT targets.
+        indices = self.matcher(outputs, targets)
 
         # TODO: Compute all the requested losses and combine them in a dictionary. The
         # keys should match those in self.weight_dict so they can be combined with compute_total_loss.
+        loss_labels = self.loss_labels(outputs, targets, indices)
+
+        num_boxes = max(sum(len(t["labels"]) for t in targets), 1)  # clamp to 1 to avoid division by zero when a batch has no GT boxes
+        loss_boxes = self.loss_boxes(outputs, targets, indices, num_boxes)
+        
         losses = {}
+        losses.update(loss_labels)
+        losses.update(loss_boxes)
+
         return losses

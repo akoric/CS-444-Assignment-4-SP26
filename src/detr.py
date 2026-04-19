@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .backbones import ViTBackbone
+from .backbones import ResNetBackbone, ViTBackbone
 
 
 def pad_images_to_batch(
@@ -184,16 +184,19 @@ class SimpleDETR(nn.Module):
             dropout: Dropout probability inside the transformer.
         """
         super().__init__()
-        self.backbone = ViTBackbone(name=backbone)
+        if isinstance(backbone, str) and backbone.lower().startswith("resnet"):
+            self.backbone = ResNetBackbone(name=backbone)
+        else:
+            self.backbone = ViTBackbone(name=backbone)
         self.position_embedding = PositionEmbeddingSine(d_model // 2, normalize=True)
         self.num_queries = num_queries
 
         # TODO: self.input_proj is a 1x1 convolution that projects the backbone's output feature
         # dimension to the transformer's hidden dimension d_model.
 
-        backbone_output_dim = self.backbone.config.hidden_size # get the backbone output dimension
+        backbone_output_dim = self.backbone.out_channels  # get the backbone output dimension
         # channel-wise linear projection
-        # conv weight matrix = [256, 384, 1, 1]
+        # conv weight matrix = [384, 256, 1, 1]
         # Result: [B, 384, H, W] → [B, 256, H, W]
         self.input_proj = nn.Conv2d(backbone_output_dim, d_model, kernel_size=1)
 
@@ -287,7 +290,8 @@ class SimpleDETR(nn.Module):
             src=src_with_pos, # encoder input  [B, seq_len, 256]
             tgt=query, # decoder input  [B, 25, 256]
             src_key_padding_mask=mask_flat, # tell encoder to ignore padded pixels
-            tgt_key_padding_mask=None # no mask needed for queries
+            tgt_key_padding_mask=None, # no mask needed for queries
+            memory_key_padding_mask=mask_flat, # tell decoder cross-attention to ignore padded encoder tokens
         ) # decoder_out shape: [B, 25, 256]
 
 
